@@ -1,14 +1,14 @@
-struct Simple {
+pub struct Simple {
     regfile: [u16; 128],
     ram: [u8; 65536],
 }
 
 impl Simple {
-    fn new() -> Self {
+    pub fn new() -> Self {
         Simple { regfile: [0; 128], ram: [0; 65536] }
     }
 
-    fn load_program(&mut self, program: Vec<u8>) {
+    pub fn load_program(&mut self, program: Vec<u8>) {
         for (index, byte) in program.iter().enumerate() {
             self.ram[index] = *byte;
         }
@@ -20,6 +20,26 @@ impl Simple {
 
     fn flags(&self) -> u16 {
         self.regfile[33]
+    }
+
+    fn zf(&self) -> bool {
+        self.flags() & alu::ZF > 0
+    }
+
+    fn cf(&self) -> bool {
+        self.flags() & alu::CF > 0
+    }
+
+    fn of(&self) -> bool {
+        self.flags() & alu::OF > 0
+    }
+
+    fn sf(&self) -> bool {
+        self.flags() & alu::SF > 0
+    }
+
+    fn ef(&self) -> bool {
+        self.flags() & alu::EF > 0
     }
 
     fn read_16(&self, address: usize) -> u16 {
@@ -38,10 +58,33 @@ impl Simple {
         }
     }
 
-    pub fn step(&mut self) {
+    fn should_jump(&self, cond: usize) -> bool {
+        match cond {
+            1 => !self.zf() && !self.cf(),
+            2 => !self.cf(),
+            3 => self.cf(),
+            4 => self.cf() || self.zf(),
+            5 => !self.zf() && self.sf() == self.of(),
+            6 => self.sf() == self.of(),
+            7 => self.sf() != self.of(),
+            8 => !self.zf() || self.sf() != self.zf(),
+            9 => self.zf(),
+            10 => !self.zf(),
+            11 => self.of(),
+            12 => !self.of(),
+            13 => true,
+            _ => false,
+        }
+    }
+
+    pub fn step(&mut self) -> bool {
         let instruction = self.read_16(self.ip()) as usize;
+        eprintln!("{:>2}: {:0>16b}  {:>2x?}", self.ip(), instruction, &self.regfile[0..8]);
+        if instruction == 0 {
+            return false;
+        }
         match instruction >> 12 {
-            0b0000 => {
+            0b0000 => { // 1op / 2op
                 let op = (instruction >> 8) & 0b1111;
                 // if op == 0 { 1op }
                 let rd = (instruction >> 4) & 0b1111;
@@ -52,17 +95,80 @@ impl Simple {
                 self.regfile[33] = flags;
                 self.regfile[rd] = result;
                 self.regfile[32] += 2;
+                true
             }
-            0b1000 => {
+            0b0001 => { // j?
+                let cond = (instruction >> 8) & 0b1111;
+                let rd = (instruction >> 4) & 0b1111;
+                let typ = instruction & 0b1111;
+                let target;
+                match typ {
+                    0 => target = self.regfile[rd],
+                    1 => target = self.read_16(self.regfile[rd] as usize),
+                    2 => target = self.read_16(self.ip() + 2),
+                    _ => todo!(),
+                }
+                self.regfile[32] += 2;
+                if typ == 2 {
+                    self.regfile[32] += 2;
+                }
+                if self.should_jump(cond) {
+                    self.regfile[32] = target;
+                }
+                true
+            }
+            0b0010 => { // 2op immediate
+                let op = (instruction >> 8) & 0b1111;
+                let rd = (instruction >> 4) & 0b1111;
+                let n = (instruction & 0b1111) as u16;
+                let va = self.regfile[rd];
+                let (result, flags) = alu::alu(op, va, n, self.flags());
+                self.regfile[33] = flags;
+                self.regfile[rd] = result;
+                self.regfile[32] += 2;
+                true
+            }
+            0b0011 => { // j? relative
+                let cond = (instruction >> 8) & 0b1111;
+                let target = (instruction & 0b1111_1111) as i8 as i16 as u16;
+                self.regfile[32] += 2;
+                if self.should_jump(cond) {
+                    self.regfile[32] = self.regfile[32].wrapping_add(target);
+                }
+                true
+            }
+            0b1000 => { // mov rN, i8
                 let rd = (instruction >> 8) & 0b1111;
                 let n = instruction & 0b1111_1111;
                 self.regfile[rd] = n as u16;
                 self.regfile[32] += 2;
+                true
+            }
+            0b1001 => { // mov rN, i16
+                let rd = (instruction >> 8) & 0b1111;
+                let n = self.read_16(self.ip() + 2);
+                self.regfile[rd] = n;
+                self.regfile[32] += 4;
+                true
+            }
+            0b1011 => { // mov rNpN, rNpN
+                let rd = (instruction >> 8) & 0b1111;
+                let rs = (instruction >> 4) & 0b1111;
+                let pd = (instruction >> 2) & 0b11;
+                let ps = instruction & 0b11;
+                eprintln!("mov r{}, r{}", rd + pd * 16, rs + ps * 16);
+                self.regfile[rd + pd * 16] = self.regfile[rs + ps * 16];
+                self.regfile[32] += 2;
+                true
             }
             _ => {
                 todo!();
             }
-        };
+        }
+    }
+
+    pub fn run(&mut self) {
+        while self.step() {}
     }
 }
 
@@ -72,24 +178,53 @@ mod tests {
 
     #[test]
     fn add_program() {
+        // mov r1, 10
+        // mov r2, 11
+        // add r2, r1
         let program = vec![0x81,0x0a,0x82,0x0b,0x01,0x21];
         let mut s = Simple::new();
         s.load_program(program);
-        s.step();
-        s.step();
-        s.step();
+        s.run();
         assert_eq!(s.regfile[2], 21);
+    }
+
+    #[test]
+    fn jmp_program() {
+        // mov r1, 1
+        // jmp [ip + 2]
+        // mov r2, 2
+        let program = vec![0x81,0x01,0x3d,0x02,0x82,0x02];
+        let mut s = Simple::new();
+        s.load_program(program);
+        s.run();
+        assert_eq!(s.regfile[1], 1);
+        assert_eq!(s.regfile[2], 0);
+    }
+
+    #[test]
+    fn fib_program() {
+        let program = vec![
+            0x2b,0x10,0x39,0x12,0x82,0x00,0x83,0x01,
+            0x22,0x11,0x39,0x0c,0x01,0x23,0x22,0x11,
+            0x39,0x0a,0x01,0x32,0x3d,0xf2,0x00,0x00,
+            0xb1,0x20,0x00,0x00,0xb1,0x30,0x00,0x00,
+        ];
+        let mut s = Simple::new();
+        s.load_program(program);
+        s.regfile[1] = 11;
+        s.run();
+        assert_eq!(s.regfile[1], 55);
     }
 }
 
 mod alu {
     // TODO: bitflags!?
     type Flags = u16;
-    const ZF: u16 = 0b0001;
-    const CF: u16 = 0b0010;
-    const OF: u16 = 0b0100;
-    const SF: u16 = 0b1000;
-    const EF: u16 = 0b100_0000;
+    pub const ZF: u16 = 0b0001;
+    pub const CF: u16 = 0b0010;
+    pub const OF: u16 = 0b0100;
+    pub const SF: u16 = 0b1000;
+    pub const EF: u16 = 0b100_0000;
 
     type AluResult = (u16, Flags);
     type AluOp = fn(u16, u16, Flags) -> AluResult;
@@ -129,42 +264,42 @@ mod alu {
             ((sf as u16) << 3)
     }
 
-    fn add(a: u16, b: u16, f: Flags) -> AluResult {
+    fn add(a: u16, b: u16, _f: Flags) -> AluResult {
         let (c, cf) = a.overflowing_add(b);
         (c, flags(c, cf))
     }
 
-    fn sub(a: u16, b: u16, f: Flags) -> AluResult {
+    fn sub(a: u16, b: u16, _f: Flags) -> AluResult {
         let (c, cf) = a.overflowing_sub(b);
         (c, flags(c, cf))
     }
 
-    fn or(a: u16, b: u16, f: Flags) -> AluResult {
+    fn or(a: u16, b: u16, _f: Flags) -> AluResult {
         let c = a | b;
         (c, flags(c, false))
     }
 
-    fn nor(a: u16, b: u16, f: Flags) -> AluResult {
+    fn nor(a: u16, b: u16, _f: Flags) -> AluResult {
         let c = !(a | b);
         (c, flags(c, false))
     }
 
-    fn and(a: u16, b: u16, f: Flags) -> AluResult {
+    fn and(a: u16, b: u16, _f: Flags) -> AluResult {
         let c = a & b;
         (c, flags(c, false))
     }
 
-    fn nand(a: u16, b: u16, f: Flags) -> AluResult {
+    fn nand(a: u16, b: u16, _f: Flags) -> AluResult {
         let c = !(a & b);
         (c, flags(c, false))
     }
 
-    fn xor(a: u16, b: u16, f: Flags) -> AluResult {
+    fn xor(a: u16, b: u16, _f: Flags) -> AluResult {
         let c = a ^ b;
         (c, flags(c, false))
     }
 
-    fn xnor(a: u16, b: u16, f: Flags) -> AluResult {
+    fn xnor(a: u16, b: u16, _f: Flags) -> AluResult {
         let c = !(a ^ b);
         (c, flags(c, false))
     }
@@ -187,7 +322,7 @@ mod alu {
         (c, flags(c, cf))
     }
 
-    fn cmp(a: u16, b: u16, f: Flags) -> AluResult {
+    fn cmp(a: u16, b: u16, _f: Flags) -> AluResult {
         let (c, cf) = a.overflowing_sub(b);
         (a, flags(c, cf))
     }
