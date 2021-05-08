@@ -1,8 +1,85 @@
 struct Simple {
     regfile: [u16; 128],
+    ram: [u8; 65536],
 }
 
 impl Simple {
+    fn new() -> Self {
+        Simple { regfile: [0; 128], ram: [0; 65536] }
+    }
+
+    fn load_program(&mut self, program: Vec<u8>) {
+        for (index, byte) in program.iter().enumerate() {
+            self.ram[index] = *byte;
+        }
+    }
+
+    fn ip(&self) -> usize {
+        self.regfile[32] as usize
+    }
+
+    fn flags(&self) -> u16 {
+        self.regfile[33]
+    }
+
+    fn read_16(&self, address: usize) -> u16 {
+        ((self.ram[address] as u16) << 8) + self.ram[address + 1] as u16
+    }
+
+    fn write_16(&mut self, address: usize, value: u16) {
+        match address {
+            0xFF01 => {
+                println!("{:#x}", value);
+            }
+            _ => {
+                self.ram[address] = (value >> 8) as u8;
+                self.ram[address + 1] = value as u8;
+            }
+        }
+    }
+
+    pub fn step(&mut self) {
+        let instruction = self.read_16(self.ip()) as usize;
+        match instruction >> 12 {
+            0b0000 => {
+                let op = (instruction >> 8) & 0b1111;
+                // if op == 0 { 1op }
+                let rd = (instruction >> 4) & 0b1111;
+                let rs = instruction & 0b1111;
+                let va = self.regfile[rd];
+                let vb = self.regfile[rs];
+                let (result, flags) = alu::alu(op, va, vb, self.flags());
+                self.regfile[33] = flags;
+                self.regfile[rd] = result;
+                self.regfile[32] += 2;
+            }
+            0b1000 => {
+                let rd = (instruction >> 8) & 0b1111;
+                let n = instruction & 0b1111_1111;
+                self.regfile[rd] = n as u16;
+                self.regfile[32] += 2;
+            }
+            _ => {
+                todo!();
+            }
+        };
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn add_program() {
+        let program = vec![0x81,0x0a,0x82,0x0b,0x01,0x21];
+        let mut s = Simple::new();
+        s.load_program(program);
+        s.step();
+        s.step();
+        s.step();
+        assert_eq!(s.regfile[2], 21);
+    }
 }
 
 mod alu {
@@ -17,7 +94,7 @@ mod alu {
     type AluResult = (u16, Flags);
     type AluOp = fn(u16, u16, Flags) -> AluResult;
 
-    pub fn alu(op: u16, a: u16, b: u16, flags: Flags) -> AluResult {
+    pub fn alu(op: usize, a: u16, b: u16, flags: Flags) -> AluResult {
         if let Some(op) = dispatch_op(op) {
             op(a, b, flags)
         } else {
@@ -25,7 +102,7 @@ mod alu {
         }
     }
 
-    fn dispatch_op(op: u16) -> Option<AluOp> {
+    fn dispatch_op(op: usize) -> Option<AluOp> {
         match op {
             1 => Some(add),
             2 => Some(sub),
