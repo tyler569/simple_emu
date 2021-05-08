@@ -18,6 +18,10 @@ impl Simple {
         self.regfile[32] as usize
     }
 
+    fn advance_ip(&mut self, amount: usize) {
+        self.regfile[32] = self.regfile[32].wrapping_add(amount as u16);
+    }
+
     fn flags(&self) -> u16 {
         self.regfile[33]
     }
@@ -43,7 +47,8 @@ impl Simple {
     }
 
     fn read_16(&self, address: usize) -> u16 {
-        ((self.ram[address] as u16) << 8) + self.ram[address + 1] as u16
+        ((self.ram[address] as u16) << 8) +
+            self.ram[address.wrapping_add(1)] as u16
     }
 
     fn write_16(&mut self, address: usize, value: u16) {
@@ -53,7 +58,7 @@ impl Simple {
             }
             _ => {
                 self.ram[address] = (value >> 8) as u8;
-                self.ram[address + 1] = value as u8;
+                self.ram[address.wrapping_add(1)] = value as u8;
             }
         }
     }
@@ -79,7 +84,8 @@ impl Simple {
 
     pub fn step(&mut self) -> bool {
         let instruction = self.read_16(self.ip()) as usize;
-        eprintln!("{:>2}: {:0>16b}  {:>2x?}", self.ip(), instruction, &self.regfile[0..8]);
+        eprintln!("{:>2}: {:0>16b}  {:>2x?}",
+            self.ip(), instruction, &self.regfile[0..8]);
         if instruction == 0 {
             return false;
         }
@@ -94,23 +100,24 @@ impl Simple {
                 let (result, flags) = alu::alu(op, va, vb, self.flags());
                 self.regfile[33] = flags;
                 self.regfile[rd] = result;
-                self.regfile[32] += 2;
+                self.advance_ip(2);
                 true
             }
-            0b0001 => { // j?
+            0b0001 => { // j? abs
                 let cond = (instruction >> 8) & 0b1111;
                 let rd = (instruction >> 4) & 0b1111;
                 let typ = instruction & 0b1111;
+                let has_immediate = typ == 2;
                 let target;
                 match typ {
                     0 => target = self.regfile[rd],
                     1 => target = self.read_16(self.regfile[rd] as usize),
-                    2 => target = self.read_16(self.ip() + 2),
+                    2 => target = self.read_16(self.ip().wrapping_add(2)),
                     _ => todo!(),
                 }
-                self.regfile[32] += 2;
-                if typ == 2 {
-                    self.regfile[32] += 2;
+                self.advance_ip(2);
+                if has_immediate {
+                    self.advance_ip(2);
                 }
                 if self.should_jump(cond) {
                     self.regfile[32] = target;
@@ -125,13 +132,13 @@ impl Simple {
                 let (result, flags) = alu::alu(op, va, n, self.flags());
                 self.regfile[33] = flags;
                 self.regfile[rd] = result;
-                self.regfile[32] += 2;
+                self.advance_ip(2);
                 true
             }
             0b0011 => { // j? relative
                 let cond = (instruction >> 8) & 0b1111;
                 let target = (instruction & 0b1111_1111) as i8 as i16 as u16;
-                self.regfile[32] += 2;
+                self.advance_ip(2);
                 if self.should_jump(cond) {
                     self.regfile[32] = self.regfile[32].wrapping_add(target);
                 }
@@ -141,14 +148,14 @@ impl Simple {
                 let rd = (instruction >> 8) & 0b1111;
                 let n = instruction & 0b1111_1111;
                 self.regfile[rd] = n as u16;
-                self.regfile[32] += 2;
+                self.advance_ip(2);
                 true
             }
             0b1001 => { // mov rN, i16
                 let rd = (instruction >> 8) & 0b1111;
-                let n = self.read_16(self.ip() + 2);
+                let n = self.read_16(self.ip().wrapping_add(2));
                 self.regfile[rd] = n;
-                self.regfile[32] += 4;
+                self.advance_ip(4);
                 true
             }
             0b1011 => { // mov rNpN, rNpN
@@ -158,7 +165,7 @@ impl Simple {
                 let ps = instruction & 0b11;
                 eprintln!("mov r{}, r{}", rd + pd * 16, rs + ps * 16);
                 self.regfile[rd + pd * 16] = self.regfile[rs + ps * 16];
-                self.regfile[32] += 2;
+                self.advance_ip(2);
                 true
             }
             _ => {
