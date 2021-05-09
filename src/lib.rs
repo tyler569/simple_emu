@@ -1,11 +1,19 @@
 pub struct Simple {
-    regfile: [u16; 128],
+    regfile: [u16; Self::REGISTER_COUNT],
     ram: [u8; 65536],
 }
 
 impl Simple {
+    const STACK_POINTER: usize = 15;
+    const INSTRUCTION_POINTER: usize = 16;
+    const FLAG_REGISTER: usize = 17;
+    const REGISTER_COUNT: usize = 16 * 4;
+
     pub fn new() -> Self {
-        Simple { regfile: [0; 128], ram: [0; 65536] }
+        Simple {
+            regfile: [0; Self::REGISTER_COUNT],
+            ram: [0; 65536],
+        }
     }
 
     pub fn load_program(&mut self, program: Vec<u8>) {
@@ -15,15 +23,16 @@ impl Simple {
     }
 
     fn ip(&self) -> usize {
-        self.regfile[32] as usize
+        self.regfile[Self::INSTRUCTION_POINTER] as usize
     }
 
     fn advance_ip(&mut self, amount: usize) {
-        self.regfile[32] = self.regfile[32].wrapping_add(amount as u16);
+        self.regfile[Self::INSTRUCTION_POINTER] = 
+            self.regfile[Self::INSTRUCTION_POINTER].wrapping_add(amount as u16);
     }
 
     fn flags(&self) -> u16 {
-        self.regfile[33]
+        self.regfile[Self::FLAG_REGISTER]
     }
 
     fn zf(&self) -> bool {
@@ -63,6 +72,19 @@ impl Simple {
         }
     }
 
+    fn push(&mut self, value: u16) {
+        self.regfile[Self::STACK_POINTER] =
+            self.regfile[Self::STACK_POINTER].wrapping_sub(2);
+        self.write_16(self.regfile[Self::STACK_POINTER] as usize, value);
+    }
+
+    fn pop(&mut self) -> u16 {
+        let value = self.read_16(self.regfile[Self::STACK_POINTER] as usize);
+        self.regfile[Self::STACK_POINTER] =
+            self.regfile[Self::STACK_POINTER].wrapping_add(2);
+        value
+    }
+
     fn should_jump(&self, cond: usize) -> bool {
         match cond {
             1 => !self.zf() && !self.cf(),
@@ -90,15 +112,28 @@ impl Simple {
             return false;
         }
         match instruction >> 12 {
-            0b0000 => { // 1op / 2op
+            0b0000 if instruction >> 8 == 0 => { // 1op
+                let rd = instruction & 0b1111;
+                match instruction >> 4 {
+                    1 => self.regfile[rd] = !self.regfile[rd],
+                    2 => self.regfile[rd] = !self.regfile[rd].wrapping_add(1),
+                    3 => self.push(self.regfile[rd]),
+                    4 => self.regfile[rd] = self.pop(),
+                    5 => self.regfile[rd] = self.regfile[rd].wrapping_add(1),
+                    6 => self.regfile[rd] = self.regfile[rd].wrapping_sub(1),
+                    _ => todo!(),
+                };
+                self.advance_ip(2);
+                true
+            }
+            0b000 => { // 2op
                 let op = (instruction >> 8) & 0b1111;
-                // if op == 0 { 1op }
                 let rd = (instruction >> 4) & 0b1111;
                 let rs = instruction & 0b1111;
                 let va = self.regfile[rd];
                 let vb = self.regfile[rs];
                 let (result, flags) = alu::alu(op, va, vb, self.flags());
-                self.regfile[33] = flags;
+                self.regfile[Self::FLAG_REGISTER] = flags;
                 self.regfile[rd] = result;
                 self.advance_ip(2);
                 true
@@ -120,7 +155,7 @@ impl Simple {
                     self.advance_ip(2);
                 }
                 if self.should_jump(cond) {
-                    self.regfile[32] = target;
+                    self.regfile[Self::INSTRUCTION_POINTER] = target;
                 }
                 true
             }
@@ -130,20 +165,40 @@ impl Simple {
                 let n = (instruction & 0b1111) as u16;
                 let va = self.regfile[rd];
                 let (result, flags) = alu::alu(op, va, n, self.flags());
-                self.regfile[33] = flags;
+                self.regfile[Self::FLAG_REGISTER] = flags;
                 self.regfile[rd] = result;
                 self.advance_ip(2);
                 true
             }
             0b0011 => { // j? relative
                 let cond = (instruction >> 8) & 0b1111;
-                let target = (instruction & 0b1111_1111) as i8 as i16 as u16;
+                let target = (instruction & 0b1111_1111) as i8 as i16 as usize;
                 self.advance_ip(2);
                 if self.should_jump(cond) {
-                    self.regfile[32] = self.regfile[32].wrapping_add(target);
+                    self.advance_ip(target);
                 }
                 true
             }
+            0b0100 => { // mov rN, [rS + rO]
+                let rd = (instruction >> 8) & 0b1111;
+                let rs = (instruction >> 4) & 0b1111;
+                let ro = instruction & 0b1111;
+                let address = self.regfile[rs].wrapping_add(self.regfile[ro]);
+                self.regfile[rd] = self.read_16(address as usize);
+                self.advance_ip(2);
+                true
+            }
+            0b0101 => { // mov [rN + rO], rS
+                let rd = (instruction >> 8) & 0b1111;
+                let rs = (instruction >> 4) & 0b1111;
+                let ro = instruction & 0b1111;
+                let address = self.regfile[rd].wrapping_add(self.regfile[ro]);
+                self.write_16(address as usize, self.regfile[rs]);
+                self.advance_ip(2);
+                true
+            }
+            // 0b0110 empty
+            // 0b0111 empty
             0b1000 => { // mov rN, i8
                 let rd = (instruction >> 8) & 0b1111;
                 let n = instruction & 0b1111_1111;
@@ -158,6 +213,7 @@ impl Simple {
                 self.advance_ip(4);
                 true
             }
+            // 0b1010 empty
             0b1011 => { // mov rNpN, rNpN
                 let rd = (instruction >> 8) & 0b1111;
                 let rs = (instruction >> 4) & 0b1111;
@@ -168,6 +224,7 @@ impl Simple {
                 self.advance_ip(2);
                 true
             }
+            // 0b1100 - 0b1111 empty
             _ => {
                 todo!();
             }
@@ -221,6 +278,32 @@ mod tests {
         s.regfile[1] = 11;
         s.run();
         assert_eq!(s.regfile[1], 55);
+    }
+
+    #[test]
+    fn inc_program() {
+        let program = vec![0x00,0x51,0x00,0x51,0x00,0x51];
+        let mut s = Simple::new();
+        s.load_program(program);
+        s.run();
+        assert_eq!(s.regfile[1], 3);
+    }
+
+    #[test]
+    fn stack_program() {
+        let program = vec![
+            0x81,0xff,0x00,0x31,0x00,0x31,0x00,0x31,
+            0x00,0x42,0x00,0x43,0x00,0x44,0x00,0x45,
+        ];
+        let mut s = Simple::new();
+        s.load_program(program);
+        s.run();
+        assert_eq!(s.regfile[1], 255);
+        assert_eq!(s.regfile[2], 255);
+        assert_eq!(s.regfile[3], 255);
+        assert_eq!(s.regfile[4], 255);
+        assert_ne!(s.regfile[5], 255);
+        assert_eq!(s.regfile[15], 2);
     }
 }
 
