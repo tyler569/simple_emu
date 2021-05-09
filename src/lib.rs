@@ -63,7 +63,7 @@ impl Simple {
     fn write_16(&mut self, address: usize, value: u16) {
         match address {
             0xFF01 => {
-                println!("{:#x}", value);
+                eprintln!("OUT: {}", value);
             }
             _ => {
                 self.ram[address] = (value >> 8) as u8;
@@ -106,8 +106,8 @@ impl Simple {
 
     pub fn step(&mut self) -> bool {
         let instruction = self.read_16(self.ip()) as usize;
-        eprintln!("{:>2}: {:0>16b}  {:>2x?}",
-            self.ip(), instruction, &self.regfile[0..8]);
+        eprintln!("{:>2}: {:0>16b}  {:>4x?}",
+            self.ip(), instruction, &self.regfile[0..16]);
         if instruction == 0 {
             return false;
         }
@@ -126,7 +126,7 @@ impl Simple {
                 self.advance_ip(2);
                 true
             }
-            0b000 => { // 2op
+            0b0000 => { // 2op
                 let op = (instruction >> 8) & 0b1111;
                 let rd = (instruction >> 4) & 0b1111;
                 let rs = instruction & 0b1111;
@@ -155,6 +155,7 @@ impl Simple {
                     self.advance_ip(2);
                 }
                 if self.should_jump(cond) {
+                    eprintln!("jmp {}", target as i16);
                     self.regfile[Self::INSTRUCTION_POINTER] = target;
                 }
                 true
@@ -175,6 +176,7 @@ impl Simple {
                 let target = (instruction & 0b1111_1111) as i8 as i16 as usize;
                 self.advance_ip(2);
                 if self.should_jump(cond) {
+                    eprintln!("jmp relative {}", target as i16);
                     self.advance_ip(target);
                 }
                 true
@@ -197,8 +199,42 @@ impl Simple {
                 self.advance_ip(2);
                 true
             }
-            // 0b0110 empty
-            // 0b0111 empty
+            0b0110 => { // call? abs
+                // COPYPASTE from 0b0001
+                let cond = (instruction >> 8) & 0b1111;
+                let rd = (instruction >> 4) & 0b1111;
+                let typ = instruction & 0b1111;
+                let has_immediate = typ == 2;
+                let target;
+                match typ {
+                    0 => target = self.regfile[rd],
+                    1 => target = self.read_16(self.regfile[rd] as usize),
+                    2 => target = self.read_16(self.ip().wrapping_add(2)),
+                    _ => todo!(),
+                }
+                self.advance_ip(2);
+                if has_immediate {
+                    self.advance_ip(2);
+                }
+                if self.should_jump(cond) {
+                    eprintln!("call {}", target as i16);
+                    self.push(self.regfile[Self::INSTRUCTION_POINTER]);
+                    self.regfile[Self::INSTRUCTION_POINTER] = target;
+                }
+                true
+            }
+            0b0111 => { // call? relative
+                // COPYPASTE from 0b0011
+                let cond = (instruction >> 8) & 0b1111;
+                let target = (instruction & 0b1111_1111) as i8 as i16 as usize;
+                self.advance_ip(2);
+                if self.should_jump(cond) {
+                    eprintln!("call relative {}", target as i16);
+                    self.push(self.regfile[Self::INSTRUCTION_POINTER]);
+                    self.advance_ip(target);
+                }
+                true
+            }
             0b1000 => { // mov rN, i8
                 let rd = (instruction >> 8) & 0b1111;
                 let n = instruction & 0b1111_1111;
@@ -213,7 +249,15 @@ impl Simple {
                 self.advance_ip(4);
                 true
             }
-            // 0b1010 empty
+            0b1010 => { // misc
+                match instruction & 0b1111_1111_1111 {
+                    1 => {
+                        self.regfile[Self::INSTRUCTION_POINTER] = self.pop();
+                        true
+                    }
+                    _ => todo!(),
+                }
+            }
             0b1011 => { // mov rNpN, rNpN
                 let rd = (instruction >> 8) & 0b1111;
                 let rs = (instruction >> 4) & 0b1111;
@@ -304,6 +348,26 @@ mod tests {
         assert_eq!(s.regfile[4], 255);
         assert_ne!(s.regfile[5], 255);
         assert_eq!(s.regfile[15], 2);
+    }
+
+    #[test]
+    fn call_program() {
+        let program = vec![
+            0x88,0x0a,0x7d,0x24,0x7d,0x1a,0x88,0x64,
+            0x7d,0x1e,0x7d,0x14,0x81,0x00,0x92,0x00,
+            0x03,0xe8,0xb8,0x10,0x7d,0x16,0x7d,0x08,
+            0x00,0x51,0x0b,0x82,0x37,0xf4,0x00,0x00,
+            0x99,0x00,0xff,0x01,0x59,0x80,0xa0,0x01,
+            0x21,0x81,0xa0,0x01,0x2b,0x80,0x39,0x12,
+            0x89,0x00,0x8a,0x01,0x22,0x81,0x39,0x10,
+            0x01,0x9a,0x22,0x81,0x39,0x06,0x01,0xa9,
+            0x3d,0xf2,0xa0,0x01,0xb8,0x90,0xa0,0x01,
+            0xb8,0xa0,0xa0,0x01,
+        ];
+        let mut s = Simple::new();
+        s.load_program(program);
+        s.run();
+        assert_eq!(s.regfile[8], 1597);
     }
 }
 
